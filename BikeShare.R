@@ -4,6 +4,8 @@ library(vroom)
 library(DataExplorer)
 library(ggplot2)
 library(patchwork)
+library(poissonreg)
+library(bestglm)
 
 ### read in data
 test_data <- vroom("test.csv")
@@ -49,9 +51,57 @@ graph4 <- ggplot(train_data, aes(x = windspeed, y = count, color = humidity)) +
   labs(x = "Wind Speed", y = "Number of Total Rentals")
 
 
-(graph1 + graph2) / (graph3 + graph4)
+(graph1 + graph2) / (graph3 + graph4) 
 
+
+## clean data
+train_data$weather <- as.numeric(as.character(train_data$weather))
+train_data$weather[train_data$weather == 4] <- 3
+train_data <- train_data |>
+  mutate(weather)
+
+
+## Setup and Fit the Linear Regression Model
+linmod <- linear_reg() |>
+  set_engine("lm") |>
+  set_mode("regression") |>
+  fit(formula = count~weather+windspeed, data=train_data)
+
+## Generate Predictions Using Linear Model
+bike_predict <- predict(linmod, new_data = test_data)
+bike_predict
 
      
+## Format predictions for Kaggle
+kaggle <- bike_predict |>
+  bind_cols(test_data) |>
+  select(datetime, .pred) |>
+  rename(count = .pred) |>
+  mutate(count = pmax(0,count)) |>
+  mutate(datetime = as.character(format(datetime)))
 
+##write out file
+vroom_write(x = kaggle, file = "./BikeSharePreds.csv", delim=",")
+
+
+##Poisson Regression Model
+pois_model <- poisson_reg() |>
+  set_engine("glm") |>
+  set_mode("regression") |> 
+  fit(formula= count~windspeed + as.factor(weather), data=train_data)
+
+##Generate Predictions Using Linear Model
+bike_predict2 <- predict(pois_model, new_data = train_data)
+bike_predict2
+
+## Format Pois Predictions for Kaggle
+pois_kaggle <- bike_predict2 |>
+  bind_cols(test_data) |>
+  select(datetime, .pred) |>
+  rename(count = .pred) |>
+  mutate(count = pmax(0,count)) |>
+  mutate(datetime = as.character(format(datetime)))
+
+##write out file
+vroom_write(x = pois_kaggle, file = "./BikePoisPreds.csv", delim=",")
 
