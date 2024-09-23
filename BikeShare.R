@@ -55,25 +55,41 @@ graph4 <- ggplot(train_data, aes(x = windspeed, y = count, color = humidity)) +
 
 
 ## clean data
-train_data$weather <- as.numeric(as.character(train_data$weather))
-train_data$weather[train_data$weather == 4] <- 3
 train_data <- train_data |>
-  mutate(weather)
+  select(-casual, -registered) |>
+  mutate(count = log(count))
+  
+
+cleaning_recipe <- recipe(count~., data = train_data) |>
+  step_mutate(weather = ifelse(weather == 4,3,weather)) |>
+  step_mutate(weather = factor(weather, labels = c("sunny", "cloudy", "stormy"))) |>
+  step_date(datetime, features = "month") |>
+  step_time(datetime, features = "hour") |>
+  step_mutate(season = factor(season, labels = c("spring", "summer", "fall", "winter")))
+prepped_recipe <- prep(cleaning_recipe)
+bake(prepped_recipe, new_data = train_data)
 
 
-## Setup and Fit the Linear Regression Model
+
+## Define Linear Regression Model
 linmod <- linear_reg() |>
   set_engine("lm") |>
-  set_mode("regression") |>
-  fit(formula = count~weather+windspeed, data=train_data)
+  set_mode("regression")
 
-## Generate Predictions Using Linear Model
-bike_predict <- predict(linmod, new_data = test_data)
-bike_predict
+## Combine into a Workflow and fit
+bike_workflow <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(linmod) |>
+  fit(data=train_data)
 
+## Run all the steps on test data
+log_preds <- predict(bike_workflow, new_data = test_data)
+linear_preds <- log_preds |>
+  mutate(.pred = exp(.pred))
+linear_preds
      
 ## Format predictions for Kaggle
-kaggle <- bike_predict |>
+kaggle <- linear_preds|>
   bind_cols(test_data) |>
   select(datetime, .pred) |>
   rename(count = .pred) |>
@@ -81,21 +97,27 @@ kaggle <- bike_predict |>
   mutate(datetime = as.character(format(datetime)))
 
 ##write out file
-vroom_write(x = kaggle, file = "./BikeSharePreds.csv", delim=",")
+vroom_write(x = kaggle, file = "./BikeSharePreds3.csv", delim=",")
 
 
-##Poisson Regression Model
+##Poisson Regression Model 
 pois_model <- poisson_reg() |>
   set_engine("glm") |>
-  set_mode("regression") |> 
-  fit(formula= count~windspeed + as.factor(weather), data=train_data)
+  set_mode("regression")
 
-##Generate Predictions Using Linear Model
-bike_predict2 <- predict(pois_model, new_data = train_data)
-bike_predict2
+##Combine into a workflow and fit
+pois_workflow <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(pois_model) |>
+  fit(data = train_data)
+
+##Run all the steps on test data
+pois_log_preds <- predict(pois_workflow, new_data = test_data)
+pois_preds <- pois_log_preds |>
+  mutate(.pred = exp(.pred))
 
 ## Format Pois Predictions for Kaggle
-pois_kaggle <- bike_predict2 |>
+pois_kaggle <- pois_preds |>
   bind_cols(test_data) |>
   select(datetime, .pred) |>
   rename(count = .pred) |>
@@ -103,5 +125,5 @@ pois_kaggle <- bike_predict2 |>
   mutate(datetime = as.character(format(datetime)))
 
 ##write out file
-vroom_write(x = pois_kaggle, file = "./BikePoisPreds.csv", delim=",")
+vroom_write(x = pois_kaggle, file = "./BikePoisPreds2.csv", delim=",")
 
