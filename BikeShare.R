@@ -7,6 +7,10 @@ library(patchwork)
 library(poissonreg)
 library(bestglm)
 library(rpart)
+library(ranger)
+library(stacks)
+
+
 
 ### read in data
 test_data <- vroom("test.csv")
@@ -55,6 +59,7 @@ graph4 <- ggplot(train_data, aes(x = windspeed, y = count, color = humidity)) +
 (graph1 + graph2) / (graph3 + graph4) 
 
 
+#####################################################################################
 ## clean data
 train_data <- train_data |>
   select(-casual, -registered) |>
@@ -67,11 +72,8 @@ cleaning_recipe <- recipe(count~., data = train_data) |>
   step_time(datetime, features = "hour") |>
   step_date(datetime, features = "month") |>
   step_mutate(hour=factor(datetime_hour)) |>
-  step_mutate(hour_group = case_when(hour %in% c(6,7,8,9) ~ "morning_rush",
-                                     hour %in% c(16,17,18,19) ~ "night_rush",
-                                     TRUE ~ "other")) |>
-  step_mutate(hour_group = factor(hour_group)) |>
-  step_interact(~ hour_group:workingday) |>
+  step_interact(~ hour:workingday) |>
+  step_interact(~workingday:weather) |>
   step_rm(datetime, datetime_hour) |>
   step_mutate(season = factor(season, labels = c("spring", "summer", "fall", "winter"))) |>
   step_dummy(all_nominal_predictors()) |>
@@ -82,7 +84,7 @@ prepped_recipe <- prep(cleaning_recipe)
 show <- bake(prepped_recipe, new_data = train_data)
 
   
-
+###################################################################################
 ## Define Linear Regression Model
 linmod <- linear_reg() |>
   set_engine("lm") |>
@@ -112,6 +114,7 @@ kaggle <- linear_preds|>
 vroom_write(x = kaggle, file = "./BikeSharePreds3.csv", delim=",")
 
 
+###################################################################################
 ##Poisson Regression Model 
 pois_model <- poisson_reg() |>
   set_engine("glm") |>
@@ -140,7 +143,7 @@ pois_kaggle <- pois_preds |>
 vroom_write(x = pois_kaggle, file = "./BikePoisPreds2.csv", delim=",")
 
 
-
+###################################################################################
 ##Penalized regression model
 penmod <- linear_reg(penalty = 1, mixture = 0.001) |>
   set_engine("glmnet") |>
@@ -178,9 +181,7 @@ pen_kaggle <- pen_preds |>
 vroom_write(x = pen_kaggle, file = "./BikePRegPreds.csv", delim=",")
 
 
-
-
-
+####################################################################################
 ##Penalized regression model 2
 pregmod <- linear_reg(penalty=tune(),
                       mixture=tune()) |>
@@ -232,7 +233,7 @@ tune_kaggle <- tune_preds |>
 ##write out file
 vroom_write(x = tune_kaggle, file = "./BikeTuningPreds.csv", delim=",")
 
-
+###################################################################################
 ## Regression Trees
 
 treemod <- decision_tree(tree_depth = tune(),
@@ -287,3 +288,157 @@ tree_kaggle <- tree_preds |>
 ##write out file
 vroom_write(x = tree_kaggle, file = "./BikeTreePreds.csv", delim=",")
 
+#################################################################################
+## random forest
+forest_mod <- rand_forest(mtry = tune(),
+                          min_n = tune(),
+                          trees = 500) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+## Create a workflow with recipe
+forest_wf <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(forest_mod)
+
+## Set up grid and tuning values
+forest_tuning_params <- grid_regular(mtry(range = c(1,50)),
+                                   min_n(),
+                                   levels = 5)
+
+##Split data for CV
+forest_folds <- vfold_cv(train_data, v = 5, repeats = 1)
+
+##Run the CV
+forest_CV_results <- forest_wf |>
+  tune_grid(resamples=forest_folds,
+            grid = forest_tuning_params,
+            metrics =metric_set(rmse,mae,rsq))
+
+##Find Best Tuning Parameters
+forest_best_tune <- forest_CV_results |>
+  select_best(metric = "rmse")
+
+##finalize the workflow and fit it
+forest_final <- forest_wf |>
+  finalize_workflow(forest_best_tune) |>
+  fit(data = train_data)
+
+##predict
+forest_preds_log <- forest_final |>
+  predict(new_data = test_data)
+forest_preds <- forest_preds_log |>
+  mutate(.pred = exp(.pred))
+
+## Format Penalized Regression 2 Predictions for Kaggle
+forest_kaggle <- forest_preds |>
+  bind_cols(test_data) |>
+  select(datetime, .pred) |>
+  rename(count = .pred) |>
+  mutate(count = pmax(0,count)) |>
+  mutate(datetime = as.character(format(datetime)))
+
+##write out file
+vroom_write(x = forest_kaggle, file = "./BikeForestPreds.csv", delim=",")
+
+
+####################################################################################
+##Stacks
+
+## Split data for CV
+folds <- vfold_cv(train_data, v = 5, repeats = 1)
+
+##Create a control grid
+untune_model <- control_stack_grid()
+tuned_model <- control_stack_resamples()
+
+###Penalized Regression Model
+pregmod <- linear_reg(penalty=tune(),
+                      mixture=tune()) |>
+  set_engine("glmnet")
+
+##set workflow
+preg_workflow <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(pregmod)
+
+##Grid of values to tune over
+tuning_params <- grid_regular(penalty(),
+                              mixture(),
+                              levels = 10)
+
+## Run the CV
+preg_mods <- preg_workflow |>
+  tune_grid(resamples = folds,
+            grid = tuning_params,
+            metrics = metric_set(rmse,mae,rsq),
+            control = untune_model)
+
+###Random Forest Model
+forest_mod <- rand_forest(mtry = tune(),
+                          min_n = tune(),
+                          trees = 250) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+## Create a workflow with recipe
+forest_wf <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(forest_mod)
+
+## Set up grid and tuning values
+forest_tuning_params <- grid_regular(mtry(range = c(1,50)),
+                                     min_n(),
+                                     levels = 5)
+
+## Run the CV
+forest_mods <- forest_wf |>
+  tune_grid(resamples = folds,
+            grid = forest_tuning_params,
+            metrics = metric_set(rmse,mae,rsq),
+            control = untune_model)
+
+##Linear Regression Model
+linmod <- linear_reg() |>
+  set_engine("lm") |>
+  set_mode("regression")
+
+## Combine into a Workflow
+bike_workflow <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(linmod)
+
+##Fit model
+tuned_linmod <- fit_resamples(bike_workflow,
+              resamples = folds,
+              metrics = metric_set(rmse,mae,rsq),
+              control = tuned_model)
+
+##Specify with models to include
+my_stack <- stacks() |>
+  add_candidates(preg_mods) |>
+  add_candidates(forest_mods) |>
+  add_candidates(tuned_linmod)
+
+##Fit the stacked model
+stack_mod <- my_stack |>
+  blend_predictions() |>
+  fit_members()
+
+##Use the stacked data to get a prediction
+
+stack_preds_log <- stack_mod |>
+  predict(new_data = test_data)
+stack_preds <- stack_preds_log |>
+  mutate(.pred = exp(.pred))
+
+## Format Penalized Regression 2 Predictions for Kaggle
+stack_kaggle <- stack_preds |>
+  bind_cols(test_data) |>
+  select(datetime, .pred) |>
+  rename(count = .pred) |>
+  mutate(count = pmax(0,count)) |>
+  mutate(datetime = as.character(format(datetime)))
+
+##write out file
+vroom_write(x = stack_kaggle, file = "./BikeStackPreds.csv", delim=",")
