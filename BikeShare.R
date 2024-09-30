@@ -9,6 +9,8 @@ library(bestglm)
 library(rpart)
 library(ranger)
 library(stacks)
+library(dbarts)
+
 
 
 
@@ -398,18 +400,19 @@ forest_mods <- forest_wf |>
             metrics = metric_set(rmse,mae,rsq),
             control = untune_model)
 
-##Linear Regression Model
-linmod <- linear_reg() |>
-  set_engine("lm") |>
-  set_mode("regression")
+##BART Model
+bart_mod <- parsnip::bart(mode = "regression",
+                          trees = 500)
 
-## Combine into a Workflow
-bike_workflow <- workflow() |>
+
+## Create a workflow with recipe
+bart_wf <- workflow() |>
   add_recipe(cleaning_recipe) |>
-  add_model(linmod)
+  add_model(bart_mod) |>
+  fit(data = train_data)
 
 ##Fit model
-tuned_linmod <- fit_resamples(bike_workflow,
+tuned_bartmod <- fit_resamples(bart_wf,
               resamples = folds,
               metrics = metric_set(rmse,mae,rsq),
               control = tuned_model)
@@ -418,7 +421,7 @@ tuned_linmod <- fit_resamples(bike_workflow,
 my_stack <- stacks() |>
   add_candidates(preg_mods) |>
   add_candidates(forest_mods) |>
-  add_candidates(tuned_linmod)
+  add_candidates(tuned_bartmod)
 
 ##Fit the stacked model
 stack_mod <- my_stack |>
@@ -441,4 +444,34 @@ stack_kaggle <- stack_preds |>
   mutate(datetime = as.character(format(datetime)))
 
 ##write out file
-vroom_write(x = stack_kaggle, file = "./BikeStackPreds.csv", delim=",")
+vroom_write(x = stack_kaggle, file = "./BikeNewStackPreds.csv", delim=",")
+
+############################################################################################
+## Bayesian additive regression trees
+bart_mod <- parsnip::bart(mode = "regression",
+                 trees = 250)
+
+
+## Create a workflow with recipe
+bart_wf <- workflow() |>
+  add_recipe(cleaning_recipe) |>
+  add_model(bart_mod) |>
+  fit(data = train_data)
+
+
+##predict
+bart_preds_log <- bart_wf |>
+  predict(new_data = test_data)
+bart_preds <- bart_preds_log |>
+  mutate(.pred = exp(.pred))
+
+## Format Penalized Regression 2 Predictions for Kaggle
+bart_kaggle <- bart_preds |>
+  bind_cols(test_data) |>
+  select(datetime, .pred) |>
+  rename(count = .pred) |>
+  mutate(count = pmax(0,count)) |>
+  mutate(datetime = as.character(format(datetime)))
+
+##write out file
+vroom_write(x = bart_kaggle, file = "./BikeBartPreds.csv", delim=",")
