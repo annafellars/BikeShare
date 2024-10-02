@@ -73,9 +73,10 @@ cleaning_recipe <- recipe(count~., data = train_data) |>
   step_mutate(weather = factor(weather, labels = c("sunny", "cloudy", "stormy"))) |>
   step_time(datetime, features = "hour") |>
   step_date(datetime, features = "month") |>
+  step_date(datetime, features = "year") |>
   step_mutate(hour=factor(datetime_hour)) |>
   step_interact(~ hour:workingday) |>
-  step_interact(~workingday:weather) |>
+  step_interact(~ datetime_year:workingday) |>
   step_rm(datetime, datetime_hour) |>
   step_mutate(season = factor(season, labels = c("spring", "summer", "fall", "winter"))) |>
   step_dummy(all_nominal_predictors()) |>
@@ -449,7 +450,7 @@ vroom_write(x = stack_kaggle, file = "./BikeNewStackPreds.csv", delim=",")
 ############################################################################################
 ## Bayesian additive regression trees
 bart_mod <- parsnip::bart(mode = "regression",
-                 trees = 250)
+                 trees = 1000)
 
 
 ## Create a workflow with recipe
